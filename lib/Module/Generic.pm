@@ -39,7 +39,7 @@ BEGIN
     @EXPORT      = qw( );
     @EXPORT_OK   = qw( subclasses );
     %EXPORT_TAGS = ();
-    $VERSION     = '2.0';
+    $VERSION     = '0.1';
     $VERBOSE     = 0;
     $DEBUG       = 0;
     $SILENT_AUTOLOAD      = 1;
@@ -1319,7 +1319,8 @@ sub VERBOSE
 AUTOLOAD
 {
     my $self;
-    $self = shift( @_ ) if( ref( $_[ 0 ] ) && index( ref( $_[ 0 ] ), 'Module::' ) != -1 );
+    # $self = shift( @_ ) if( ref( $_[ 0 ] ) && index( ref( $_[ 0 ] ), 'Module::' ) != -1 );
+    $self = shift( @_ ) if( Scalar::Util::blessed( $_[0] ) && $_[0]->isa( 'Module::Generic' ) );
     my( $class, $meth );
     $class = ref( $self ) || $self;
     ## Leave this commented out as we need it a little bit lower
@@ -1520,6 +1521,68 @@ DESTROY
 {
     ## Do nothing
 };
+
+package Module::Generic::Error;
+BEGIN
+{
+	use strict;
+	use parent qw( Module::Generic );
+	use Scalar::Util;
+	use overload ('""'     => 'as_string',
+				  '=='     => sub { _obj_eq(@_) },
+				  '!='     => sub { !_obj_eq(@_) },
+				  fallback => 1,
+				 );
+};
+
+sub as_string { return( $_[0]->{message} ); }
+
+sub code { return( shift->_set_get_scalar( 'code', @_ ) ); }
+
+sub file { return( shift->_set_get_scalar( 'file', @_ ) ); }
+
+sub line { return( shift->_set_get_scalar( 'line', @_ ) ); }
+
+sub message { return( shift->_set_get_scalar( 'message', @_ ) ); }
+
+sub package { return( shift->_set_get_scalar( 'package', @_ ) ); }
+
+sub retry_after { return( shift->_set_get_scalar( 'retry_after', @_ ) ); }
+
+sub subroutine { return( shift->_set_get_scalar( 'subroutine', @_ ) ); }
+
+sub trace { return( shift->_set_get_scalar( 'trace', @_ ) ); }
+
+sub type { return( shift->_set_get_scalar( 'type', @_ ) ); }
+
+sub _obj_eq 
+{
+    ##return overload::StrVal( $_[0] ) eq overload::StrVal( $_[1] );
+    no overloading;
+    my $self = shift( @_ );
+    my $other = shift( @_ );
+    my $me;
+    if( Scalar::Util::blessed( $other ) && $other->isa( 'Module::Generic::Error' ) )
+    {
+    	if( $self->as_string ne $other->as_string &&
+    		$self->file ne $other->file &&
+    		$self->line ne $other->line )
+    	{
+    		return( 1 );
+    	}
+    	else
+    	{
+    		return( 0 );
+    	}
+    }
+    elsif( !ref( $other ) )
+    {
+    	my $me = $self->as_string;
+    	return( $me eq $other );
+    }
+    ## Otherwise some reference data to which we cannot compare
+    return( 0 ) ;
+}
 
 package Module::Generic::Tie;
 use Tie::Hash;

@@ -1,0 +1,27 @@
+## Project repository
+## Created by Jacques Deguest on 2019-08-26
+## Based on https://git-scm.com/docs/gitignore
+# Explicitly ignore OS X Finder thumbnail files.
+.DS_Store
+
+*.bbprojectd
+**/*.bak
+**/*.old
+**/*.*~
+**/*.bkp
+**/*-bkp*
+**/*-v?.?.pm
+
+.git
+/URI-tel*
+/MANIFEST.SKIP
+/Todo
+
+/blib/
+/.build/
+_build/
+/Makefile
+/Makefile.old
+/MYMETA*
+pm_to_blib
+/scripts

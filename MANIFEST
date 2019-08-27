@@ -1,6 +1,6 @@
+lib/Module/Generic.pm
 Makefile.PL
 MANIFEST
 META.yml
 README.md
-lib/Module/Generic.pm
 t/00.load.t

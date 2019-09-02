@@ -1,7 +1,7 @@
 ## -*- perl -*-
 ##----------------------------------------------------------------------------
 ## Module/Generic.pm
-## Version 0.3
+## Version 0.2
 ## Copyright(c) 2019 Jacques Deguest
 ## Author: Jacques Deguest <jack@deguest.jp>
 ## Created 2019/08/24
@@ -39,7 +39,7 @@ BEGIN
     @EXPORT      = qw( );
     @EXPORT_OK   = qw( subclasses );
     %EXPORT_TAGS = ();
-    $VERSION     = '0.3';
+    $VERSION     = '0.2';
     $VERBOSE     = 0;
     $DEBUG       = 0;
     $SILENT_AUTOLOAD      = 1;
@@ -267,27 +267,17 @@ sub dumpto_dumper
     return( 1 );
 }
 
-sub errno
-{
-    my $self = shift( @_ );
-    if( @_ )
-    {
-        $self->{ 'errno' } = shift( @_ ) if( $_[ 0 ] =~ /^\-?\d+$/ );
-        return( $self->error( @_ ) ) if( @_ );
-    }
-    return( $self->{ 'errno' } );
-}
-
 sub error
 {
-	my $this = shift( @_ );
-    my $self = $this->_obj2h;
+	my $self = shift( @_ );
+    my $hash  = $self->_obj2h;
 	if( @_ )
 	{
 		my $args = {};
+		my $o;
 		if( Scalar::Util::blessed( $_[0] ) && $_[0]->isa( 'Module::Error' ) )
 		{
-			$args->{object} = shift( @_ );
+			$o = shift( @_ );
 		}
 		elsif( ref( $_[0] ) eq 'HASH' )
 		{
@@ -295,31 +285,84 @@ sub error
 		}
 		else
 		{
-			$args->{ 'message' } = join( '', map( ref( $_ ) eq 'CODE' ? $_->() : $_, @_ ) );
+			my $err = join( '', map( ref( $_ ) eq 'CODE' ? $_->() : $_, @_ ) );
+			$args->{ 'message' } = $err;
+			$args->{ 'code' } = 500;
+			$args->{ 'type' } = 'unknown';
 		}
-		$args->{message} = substr( $args->{message}, 0, $self->{error_max_length} ) if( $self->{error_max_length} > 0 && length( $args->{message} ) > $self->{error_max_length} );
-		$args->{skip_frames} = 1;
-		my $o = $self->{ 'error' } = ${ $class . '::ERROR' } = Module::Generic::Exception->new( %$args );
 		
-		if( $self->{error_handler} && ref( $self->{error_handler} ) eq 'CODE' )
+		if( !exists( $args->{ 'file' } ) || !exists( $args->{ 'line' } ) )
 		{
-			$self->{error_handler}->( $o );
+			my( $frame, $caller ) = ( 0, '' );
+			while( $caller = ( caller( $frame ) )[ 0 ] )
+			{
+				last if( $caller ne 'Module::Generic' );
+				$frame++;
+			}
+			my( $pack, $file, $line ) = caller( $frame );
+			my $sub  = ( caller( $frame + 1 ) )[ 3 ];
+			my $sub2 = substr( $sub, rindex( $sub, '::' ) + 2 );
+			@$args{ qw( package file line sub ) } = ( $pack, $file, $line, $sub2 );
 		}
-        elsif( $self->{ 'fatal' } )
+        $args->{ 'message' } = substr( $args->{ 'message' }, 0, $hash->{ 'error_max_length' } ) if( $hash->{ 'error_max_length' } > 0 && length( $args->{ 'message' } ) > $hash->{ 'error_max_length' } );
+        my $trace = Devel::StackTrace->new( ignore_package => __PACKAGE__ );
+		$args->{ 'trace' } = $trace->as_string;
+		if( $o )
+		{
+			$o->package( $args->{package} );
+			$o->file( $args->{file} );
+			$o->line( $args->{line} );
+			$o->sub( $args->{sub} );
+			$o->trace( $args->{trace} );
+			$hash->{ 'error' } = ${ $class . '::ERROR' } = $o;
+		}
+		else
+		{
+			$hash->{ 'error' } = ${ $class . '::ERROR' } = $o = Module::Error->new( %$args );
+		}
+		
+		if( $hash->{error_handler} && ref( $hash->{error_handler} ) eq 'CODE' )
+		{
+			$hash->{error_handler}->( $o );
+		}
+        elsif( $hash->{ 'fatal' } )
         {
-            ## die( sprintf( "Within package %s in file %s at line %d: %s\n", $o->package, $o->file, $o->line, $o->message ) );
-            die( $o );
+            die( sprintf( "Within package %s in file %s at line %d: %s\n", $o->package, $o->file, $o->line, $o->message ) );
         }
-        elsif( !exists( $self->{ 'quiet' } ) || !$self->{ 'quiet' } )
+        elsif( !exists( $hash->{ 'quiet' } ) || !$hash->{ 'quiet' } )
         {
-			warn( $o );
+			warn( $o->message, "\n$trace\n" );
         }
 		return( undef() );
 	}
-	return( $self->{ 'error' } );
+	return( $hash->{ 'error' } );
 }
 
-*errstr = \&error;
+sub errno
+{
+    my $self = shift( @_ );
+    if( @_ )
+    {
+        $self->{ 'errno' } = shift( @_ ) if( $_[ 0 ] =~ /^\d+$/ );
+        $self->error( @_ ) if( @_ );
+    }
+    return( $self->{ 'errno' } );
+}
+
+##----{ Used to log an error without risking the script to die.
+sub errstr
+{
+    my $self = shift( @_ );
+    my $err  = shift( @_ );
+    my $hash = $self->_obj2h;
+    if( defined( $err ) )
+    {
+        $hash->{ 'error' } = $ERROR = $err;
+        $self->errors( $err );
+        return( undef() );
+    }
+    return( $hash->{ 'error' } );
+}
 
 sub get
 {
@@ -767,17 +810,6 @@ sub param
     return;
 }
 
-## Purpose is to get an error object thrown from another package, and make it ours and pass it along
-sub pass_error
-{
-	my $this = shift( @_ );
-	my $self = $this->_obj2h;
-	my $err  = shift( @_ );
-	return if( !ref( $err ) || !Scalar::Util::blessed( $err ) );
-	$self->{ 'error' } = ${ $class . '::ERROR' } = $err;
-	return( undef() );
-}
-
 sub quiet {	return( shift->_set_get( 'quiet', @_ ) ); }
 
 sub save
@@ -1190,79 +1222,6 @@ sub _set_get_object
 	return( $self->{ $field } );
 }
 
-sub _set_get_object_array2
-{
-    my $self  = shift( @_ );
-    my $field = shift( @_ );
-    my $class = shift( @_ );
-    if( @_ )
-    {
-    	my $this = shift( @_ );
-    	return( $self->error( "I was expecting an array ref, but instead got '$this'" ) ) if( ref( $this ) ne 'ARRAY' );
-    	for( my $i = 0; $i < scalar( @$this ); $i++ )
-    	{
-    		my $ref = $this->[ $i ];
-    		return( $self->error( "I was expecting an embeded array ref, but instead array offset $i contains '$ref'." ) ) if( ref( $ref ) ne 'ARRAY' );
-			for( my $j = 0; $j < scalar( @$ref ); $j++ )
-			{
-				if( defined( $ref->[$j] ) )
-				{
-					return( $self->error( "Array offset [$i]->[$j] is not a reference. I was expecting an object of class $class." ) ) if( !ref( $ref->[$j] ) );
-					if( Scalar::Util::blessed( $ref->[$j] ) )
-					{
-						my $pack = $ref->[$j]->isa( $class );
-						return( $self->error( "Array offset [$i]->[$j] contains an object from class $pack, but was expecting an object of class $class." ) ) if( !$ref->[$j]->isa( $class ) );
-					}
-					else
-					{
-						return( $self->error( "Array offset [$i]->[$j] is not an object. I was expecting an object of class $class" ) );
-					}
-				}
-				else
-				{
-					return( $self->error( "Array offset [$i]->[$j] contains an undefined value. I was expecting an object of class $class." ) );
-				}
-			}
-    	}
-    	$self->{ $field } = $ref;
-    }
-	return( $self->{ $field } );
-}
-
-sub _set_get_object_array
-{
-    my $self  = shift( @_ );
-    my $field = shift( @_ );
-    my $class = shift( @_ );
-    if( @_ )
-    {
-    	my $ref = shift( @_ );
-    	return( $self->error( "I was expecting an array ref, but instead got '$ref'" ) ) if( ref( $ref ) ne 'ARRAY' );
-    	for( my $i = 0; $i < scalar( @$ref ); $i++ )
-    	{
-			if( defined( $ref->[$i] ) )
-			{
-				return( $self->error( "Array offset $i is not a reference. I was expecting an object of class $class." ) ) if( !ref( $ref->[$i] ) );
-				if( Scalar::Util::blessed( $ref->[$i] ) )
-				{
-					my $pack = $ref->[$i]->isa( $class );
-					return( $self->error( "Array offset $i contains an object from class $pack, but was expecting an object of class $class." ) ) if( !$ref->[$i]->isa( $class ) );
-				}
-				else
-				{
-					return( $self->error( "Array offset $i is not an object. I was expecting an object of class $class" ) );
-				}
-			}
-			else
-			{
-				return( $self->error( "Array offset $i contains an undefined value. I was expecting an object of class $class." ) );
-			}
-    	}
-    	$self->{ $field } = $ref;
-    }
-	return( $self->{ $field } );
-}
-
 sub _set_get_object_variant
 {
 	my $self = shift( @_ );
@@ -1563,7 +1522,7 @@ DESTROY
     ## Do nothing
 };
 
-package Module::Generic::Exception;
+package Module::Generic::Error;
 BEGIN
 {
 	use strict;
@@ -1581,73 +1540,17 @@ sub init
 {
 	my $self = shift( @_ );
 	$self->{code} = '';
-	$self->{type} = '';
 	$self->{file} = '';
 	$self->{line} = '';
 	$self->{message} = '';
 	$self->{package} = '';
 	$self->{retry_after} = '';
 	$self->{subroutine} = '';
-	my $args = {};
-	if( @_ )
-	{
-		if( Scalar::Util::blessed( $_[0] ) && $_[0]->isa( 'Module::Generic::Exception' ) )
-		{
-			$args->{object} = shift( @_ );
-		}
-		elsif( ref( $_[0] ) eq 'HASH' )
-		{
-			$args  = shift( @_ );
-		}
-		else
-		{
-			$args->{ 'message' } = join( '', map( ref( $_ ) eq 'CODE' ? $_->() : $_, @_ ) );
-		}
-	}
-	# $self->SUPER::init( @_ );
-	my $skip_frame = $args->{skip_frames} || 0;
-	## Skip one frame to exclude us
-	$skip_frame++;
-    my $trace = Devel::StackTrace->new( skip_frames => $skip_frame );
-    my $frame = $trace->next_frame;
-    my $frame2 = $trace->next_frame;
-    $trace->reset_pointer;
-    if( ref( $args->{object} ) && Scalar::Util::blessed( $args->{object} ) && $args->{object}->isa( 'Module::Generic::Exception' ) )
-    {
-    	my $o = $args->{object};
-		$self->{message} = $o->message;
-		$self->{code} = $o->code;
-		$self->{type} = $o->type;
-		$self->{retry_after} = $o->retry_after;
-    }
-    else
-    {
-		$self->{message} = $args->{message} || '';
-		$self->{code} = $args->{code} if( exists( $args->{code} ) );
-		$self->{type} = $args->{type} if( exists( $args->{type} ) );
-		$self->{retry_after} = $args->{retry_after} if( exists( $args->{retry_after} ) );
-    }
-    $self->{file} = $frame->filename;
-	$self->{line} = $frame->line;
-	## The caller sub routine ( caller( n ) )[3] returns the sub called by our caller instead of the sub that called our caller, so we go one frame back to get it
-	$self->{subroutine} = $frame2->subroutine;
-	$self->{package} = $frame->package;
-	$self->{trace} = $trace;
+	$self->SUPER::init( @_ );
 	return( $self );
 }
 
-#sub as_string { return( $_[0]->{message} ); }
-## This is important as stringification is called by die, so as per the manual page, we need to end with new line
-## And will add the stack trace
-sub as_string
-{
-	no overloading;
-	my $self = shift( @_ );
-	my $str = $self->message;
-	$str =~ s/\r?\n$//g;
-	$str .= sprintf( " within package %s at line %d in file %s\n%s", $self->package, $self->line, $self->file, $self->trace->as_string );
-	return( $str );
-}
+sub as_string { return( $_[0]->{message} ); }
 
 sub caught 
 {
@@ -1682,9 +1585,17 @@ sub throw
 {
     my $self = shift( @_ );
     my $msg  = shift( @_ );
+    my $trace = Devel::StackTrace->new( ignore_package => __PACKAGE__, skip_frames => 1 );
+    my $frame = $trace->next_frame;
+    my $frame2 = $trace->next_frame;
+    $trace->reset_pointer;
     my $e = $self->new({
-    	skip_frames => 1,
     	message => $msg,
+    	file => $frame->filename,
+    	line => $frame->line,
+    	## The caller sub routine ( caller( n ) )[3] returns the sub called by our caller instead of the sub that called our caller, so we go one frame back to get it
+    	subroutine => $frame2->subroutine,
+    	package => $frame->package,
     });
     die( $e );
 }
@@ -1701,11 +1612,11 @@ sub _obj_eq
     my $self = shift( @_ );
     my $other = shift( @_ );
     my $me;
-    if( Scalar::Util::blessed( $other ) && $other->isa( 'Module::Generic::Exception' ) )
+    if( Scalar::Util::blessed( $other ) && $other->isa( 'Module::Generic::Error' ) )
     {
-    	if( $self->message eq $other->message &&
-    		$self->file eq $other->file &&
-    		$self->line == $other->line )
+    	if( $self->as_string ne $other->as_string &&
+    		$self->file ne $other->file &&
+    		$self->line ne $other->line )
     	{
     		return( 1 );
     	}
@@ -1714,10 +1625,9 @@ sub _obj_eq
     		return( 0 );
     	}
     }
-    ## Compare error message
     elsif( !ref( $other ) )
     {
-    	my $me = $self->message;
+    	my $me = $self->as_string;
     	return( $me eq $other );
     }
     ## Otherwise some reference data to which we cannot compare

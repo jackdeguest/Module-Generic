@@ -13,7 +13,7 @@
 **/*-v?.?.pm
 
 .git
-/URI-tel*
+/Module-Generic*
 /MANIFEST.SKIP
 /Todo
 

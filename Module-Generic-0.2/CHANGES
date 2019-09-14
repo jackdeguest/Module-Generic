@@ -1,4 +1,0 @@
-0.1 2019-08-26
-	- Initial version from pre-existing work done
-0.2 2019-08-28
-	- Switched from Class::Struct to inner package for management of exceptions for better granularity

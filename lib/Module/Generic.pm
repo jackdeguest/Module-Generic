@@ -298,8 +298,10 @@ sub error
 			$args->{ 'message' } = join( '', map( ref( $_ ) eq 'CODE' ? $_->() : $_, @_ ) );
 		}
 		$args->{message} = substr( $args->{message}, 0, $self->{error_max_length} ) if( $self->{error_max_length} > 0 && length( $args->{message} ) > $self->{error_max_length} );
-		$args->{skip_frames} = 1;
-		my $o = $self->{ 'error' } = ${ $class . '::ERROR' } = Module::Generic::Exception->new( %$args );
+		my $n = 1;
+		$n++ while( ( caller( $n ) )[0] eq 'Module::Generic' );
+		$args->{skip_frames} = $n;
+		my $o = $self->{ 'error' } = ${ $class . '::ERROR' } = Module::Generic::Exception->new( $args );
 		
 		if( $self->{error_handler} && ref( $self->{error_handler} ) eq 'CODE' )
 		{
@@ -376,7 +378,7 @@ sub init
     		my $val  = $vals->[ ++$i ];
     		if( exists( $self->{ $name } ) )
     		{
-    			if( index( $self->{ $name }, '::' ) != -1 )
+    			if( index( $self->{ $name }, '::' ) != -1 || $self->{ $name } =~ /^[a-zA-Z][a-zA-Z\_]*[a-zA-Z]$/ )
     			{
     				my $thisPack = $self->{ $name };
     				if( !Scalar::Util::blessed( $val ) )

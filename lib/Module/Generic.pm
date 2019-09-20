@@ -1,7 +1,7 @@
 ## -*- perl -*-
 ##----------------------------------------------------------------------------
 ## Module/Generic.pm
-## Version 0.3
+## Version 0.4
 ## Copyright(c) 2019 Jacques Deguest
 ## Author: Jacques Deguest <jack@deguest.jp>
 ## Created 2019/08/24
@@ -39,7 +39,7 @@ BEGIN
     @EXPORT      = qw( );
     @EXPORT_OK   = qw( subclasses );
     %EXPORT_TAGS = ();
-    $VERSION     = '0.3';
+    $VERSION     = '0.4';
     $VERBOSE     = 0;
     $DEBUG       = 0;
     $SILENT_AUTOLOAD      = 1;

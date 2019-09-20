@@ -27,7 +27,7 @@ BEGIN
     	}
     };
     use Devel::StackTrace;
-	use Class::Struct qw( struct );
+	# use Class::Struct qw( struct );
 	use Text::Number;
 	use Number::Format;
     our( @ISA, @EXPORT_OK, @EXPORT, %EXPORT_TAGS, $AUTOLOAD );
@@ -69,18 +69,18 @@ BEGIN
 	our $DB_RAISE_ERROR = $SQL_RAISE_ERROR;
 	our $DB_AUTO_COMMIT = $SQL_AUTO_COMMIT;
 
-	struct Module::Error => 
-	{
-	'type'		=> '$',
-	'code'		=> '$',
-	'message'	=> '$',
-	'file'		=> '$',
-	'line'		=> '$',
-	'package'	=> '$',
-	'sub'		=> '$',
-	'trace'		=> '$',
-	'retry_after' => '$',
-	};
+# 	struct Module::Error => 
+# 	{
+# 	'type'		=> '$',
+# 	'code'		=> '$',
+# 	'message'	=> '$',
+# 	'file'		=> '$',
+# 	'line'		=> '$',
+# 	'package'	=> '$',
+# 	'sub'		=> '$',
+# 	'trace'		=> '$',
+# 	'retry_after' => '$',
+# 	};
 }
 
 sub import
@@ -285,7 +285,7 @@ sub error
 	if( @_ )
 	{
 		my $args = {};
-		if( Scalar::Util::blessed( $_[0] ) && $_[0]->isa( 'Module::Error' ) )
+		if( Scalar::Util::blessed( $_[0] ) && $_[0]->isa( 'Module::Generic::Exception' ) )
 		{
 			$args->{object} = shift( @_ );
 		}
@@ -501,6 +501,10 @@ sub message
     	## print( STDERR __PACKAGE__ . "::message(): message_check() returns '$ref' (", join( '', @$ref ), ")\n" );
         ## return( 1 ) if( !( $ref = $self->message_check( @_ ) ) );
         return( 1 ) if( !$ref );
+        
+        my $opts = {};
+        $opts = pop( @$ref ) if( ref( $ref->[-1] ) eq 'HASH' );
+        
         ## By now, we should have a reference to @_ in $ref
         ## my $class = ref( $self ) || $self;
         my $stackFrame = $self->message_frame( (caller(1))[3] ) || 1;
@@ -528,10 +532,37 @@ sub message
 			my $sub = ( caller( $stackFrame + 1 ) )[3];
             $sub2 = substr( $sub, rindex( $sub, '::' ) + 2 );
         }
-        my $txt = join( '', map( ref( $_ ) eq 'CODE' ? $_->() : $_, @$ref ) );
+        my $txt;
+        if( $opts->{message} )
+        {
+        	if( ref( $opts->{message} ) eq 'ARRAY' )
+        	{
+        		$txt = join( '', map( ref( $_ ) eq 'CODE' ? $_->() : $_, @{$opts->{message}} ) );
+        	}
+        	else
+        	{
+        		$txt = $opts->{message};
+        	}
+        }
+        else
+        {
+			$txt = join( '', map( ref( $_ ) eq 'CODE' ? $_->() : $_, @$ref ) );
+        }
         my $mesg = "${class}::${sub2}() [$line]: " . $txt;
         $mesg    =~ s/\n$//gs;
         $mesg = '## ' . join( "\n## ", split( /\n/, $mesg ) );
+        
+        my $info = 
+        {
+		'message'	=> $txt,
+		'file'		=> $file,
+		'line'		=> $line,
+		'package'	=> $class,
+		'sub'		=> $sub2,
+		'level'		=> ( $_[0] =~ /^\d+$/ ? $_[0] : CORE::exists( $opts->{level} ) ? $opts->{level} : 0 ),
+        };
+        $info->{type} = $opts->{type} if( $opts->{type} );
+        
         ## If Mod perl is activated AND we are not using a private log
         if( $MOD_PERL && !${ "${class}::LOG_DEBUG" } )
         {
@@ -540,29 +571,15 @@ sub message
         	$s->log_error( $mesg );
 			## $r->rflush;
         }
-        ## Should we log message in database?
-        elsif( !-t( STDIN ) && ${ $class . '::LOG2DB' } && $self->__dbh )
+        ## e.g. in our package, we could set the handler using the curry module like $self->{_log_handler} = $self->curry::log
+        elsif( !-t( STDIN ) && $self->{_log_handler} && ref( $self->{_log_handler} ) eq 'CODE' )
         {
-        	return( $self->message_sql({
-        		'message'	=> $txt,
-        		'file'		=> $file,
-        		'line'		=> $line,
-        		'package'	=> $class,
-        		'sub'		=> $sub2,
-        		'level'		=> ( $_[0] =~ /^\d+$/ ? $_[0] : 0 ),
-        	}) );
+        	$self->{_log_handler}->( $info );
         }
         elsif( !-t( STDIN ) && ${ $class . '::MESSAGE_HANDLER' } && ref( ${ $class . '::MESSAGE_HANDLER' } ) eq 'CODE' )
         {
         	my $h = ${ $class . '::MESSAGE_HANDLER' };
-        	$h->({
-        		'message'	=> $txt,
-        		'file'		=> $file,
-        		'line'		=> $line,
-        		'package'	=> $class,
-        		'sub'		=> $sub2,
-        		'level'		=> ( $_[0] =~ /^\d+$/ ? $_[0] : 0 ),
-        	});
+        	$h->( $info );
         }
         ## Or maybe then into a private log file?
         ## This way, even if the log method is superseeded, we can keep using ours without interfering with the other one
@@ -575,7 +592,7 @@ sub message
         {
 			my $err = IO::File->new;
 			$err->fdopen( fileno( STDERR ), 'w' );
-			$err->binmode( ":utf8" );
+			$err->binmode( ":utf8" ) unless( $opts->{no_encoding} );
 			$err->autoflush( 1 );
 			$err->print( $mesg, "\n" );
         }
@@ -591,10 +608,36 @@ sub messagef
     if( $hash->{ 'verbose' } || $hash->{ 'debug' } || ${ $class . '::DEBUG' } )
     {
     	my $level = ( $_[0] =~ /^\d+$/ ? shift( @_ ) : undef() );
-        my $ref = \@_;
-        my $fmt = shift( @$ref );
-        my $txt = sprintf( $fmt, map( ref( $_ ) eq 'CODE' ? $_->() : $_, @$ref ) );
-        return( $self->message( defined( $level ) ? ( $level, $txt ) : $txt ) );
+    	my $opts = {};
+    	if( scalar( @_ ) > 1 && ref( $_[-1] ) eq 'HASH' && ( CORE::exists( $_[-1]->{level} ) || CORE::exists( $_[-1]->{type} ) || CORE::exists( $_[-1]->{message} ) ) )
+    	{
+    		$opts = pop( @_ );
+    	}
+    	$level = $opts->{level} if( !defined( $level ) && CORE::exists( $opts->{level} ) );
+    	my( $ref, $fmt );
+    	if( $opts->{message} )
+    	{
+    		if( ref( $opts->{message} ) eq 'ARRAY' )
+    		{
+    			$ref = $opts->{message};
+    			$fmt = shift( @$ref );
+    		}
+    		else
+    		{
+    			$fmt = $opts->{message};
+    			$ref = \@_;
+    		}
+    	}
+    	else
+    	{
+			$ref = \@_;
+			$fmt = shift( @$ref );
+        }
+		my $txt = sprintf( $fmt, map( ref( $_ ) eq 'CODE' ? $_->() : $_, @$ref ) );
+		$opts->{message} = $txt;
+		$opts->{level} = $level if( defined( $level ) );
+        # return( $self->message( defined( $level ) ? ( $level, $txt ) : $txt ) );
+        return( $self->message( $opts ) );
     }
     return( 1 );
 }
@@ -609,7 +652,12 @@ sub message_check
     {
     	if( $_[0] !~ /^\d/ )
     	{
-    		if( $self->{ '_message_default_level' } =~ /^\d+$/ &&
+    		## The last parameter is an options parameter which has the level property set
+    		if( ref( $_[-1] ) eq 'HASH' && CORE::exists( $_[-1]->{level} ) )
+    		{
+    			## Then let's use this
+    		}
+    		elsif( $self->{ '_message_default_level' } =~ /^\d+$/ &&
     			$self->{ '_message_default_level' } > 0 )
 			{
 				unshift( @_, $self->{ '_message_default_level' } );
@@ -622,31 +670,32 @@ sub message_check
         ## If the first argument looks line a number, and there is more than 1 argument
         ## and it is greater than 1, and greater than our current debug level
         ## well, we do not output anything then...
-        if( $_[ 0 ] =~ /^\d+$/ && @_ > 1 )
+        if( ( $_[ 0 ] =~ /^\d+$/ || ( ref( $_[-1] ) eq 'HASH' && CORE::exists( $_[-1]->{level} ) ) ) && 
+        	@_ > 1 )
         {
+        	my $message_level;
+        	if( $_[ 0 ] =~ /^\d+$/ )
+        	{
+        		$message_level = shift( @_ );
+        	}
+        	elsif( ref( $_[-1] ) eq 'HASH' && CORE::exists( $_[-1]->{level} ) )
+        	{
+        		$message_level = $_[-1]->{level};
+        	}
         	my $target_re = '';
         	if( ref( ${ "${class}::DEBUG_TARGET" } ) eq 'ARRAY' )
         	{
 				$target_re = scalar( @${ "${class}::DEBUG_TARGET" } ) ? join( '|', @${ "${class}::DEBUG_TARGET" } ) : '';
         	}
-        	if( $hash->{debug} >= $_[0] ||
-        		$hash->{verbose} >= $_[0] ||
-        		${ $class . '::DEBUG' } >= $_[0] ||
-        		$hash->{ 'debug_level' } >= $_[0] ||
+        	if( $hash->{debug} >= $message_level ||
+        		$hash->{verbose} >= $message_level ||
+        		${ $class . '::DEBUG' } >= $message_level ||
+        		$hash->{ 'debug_level' } >= $message_level ||
         		$hash->{debug} >= 100 || 
-        		( length( $target_re ) && $class =~ /^$target_re$/ && ${ $class . '::GLOBAL_DEBUG' } >= $_[0] ) )
+        		( length( $target_re ) && $class =~ /^$target_re$/ && ${ $class . '::GLOBAL_DEBUG' } >= $message_level ) )
         	{
         		## print( STDERR ref( $self ) . "::message_check(): debug is '$hash->{debug}', verbose '$hash->{verbose}', DEBUG '", ${ $class . '::DEBUG' }, "', debug_level = $hash->{debug_level}\n" );
-				shift( @_ );
-                if( ref( $_[0] ) eq 'CODE' )
-                {
-                	my $this = $_[0]->();
-                	return( [ $this ] );
-                }
-                else
-                {
-					return( \@_ );
-                }
+				return( \@_ );
         	}
         	else
         	{
@@ -689,22 +738,6 @@ sub message_frame
     	}
     }
     return( $mf );
-}
-
-sub message_sql
-{
-    my $self = shift( @_ );
-    my $hash = shift( @_ ) || return( $self->error( "No information to log was passed." ) );
-    my $dbh  = $self->__dbh->clone;
-    $hash->{ 'type' } ||= 'info';
-    my $query = <<EOT;
-INSERT INTO log (type, message, file, line, package, sub, level) VALUES(?, ?, ?, ?, ?, ?, ?)
-EOT
-	my $sth = $dbh->prepare_cached( $query ) || return( $self->error( sprintf( "Unable to prepare sql query to log message: %s\n%s", $dbh->errstr, $query ) ) );
-	$sth->execute( @$hash{ qw( type message file line package sub level ) } ) || return( $self->error( sprintf( "Unable to execute sql query to log message: %s\n%s", $dbh->errstr, $query ) ) );
-	my $id = $dbh->last_insert_id( undef, undef, 'log', undef );
-	$sth->finish;
-	return( $id );
 }
 
 sub message_switch

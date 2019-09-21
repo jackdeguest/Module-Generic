@@ -1,11 +1,11 @@
 ## -*- perl -*-
 ##----------------------------------------------------------------------------
 ## Module/Generic.pm
-## Version 0.4
+## Version 0.5.1
 ## Copyright(c) 2019 Jacques Deguest
 ## Author: Jacques Deguest <jack@deguest.jp>
 ## Created 2019/08/24
-## Modified 2019/08/25
+## Modified 2019/09/21
 ## All rights reserved.
 ## 
 ## This program is free software; you can redistribute it and/or modify it 
@@ -39,7 +39,7 @@ BEGIN
     @EXPORT      = qw( );
     @EXPORT_OK   = qw( subclasses );
     %EXPORT_TAGS = ();
-    $VERSION     = '0.4';
+    $VERSION     = '0.5.1';
     $VERBOSE     = 0;
     $DEBUG       = 0;
     $SILENT_AUTOLOAD      = 1;
@@ -427,49 +427,6 @@ sub init
     return( $self );
 }
 
-sub log
-{
-	my $self = shift( @_ );
-	my $io   = $self->log_io;
-	#print( STDERR "Module::Generic::log: \$io now is '$io'\n" );
-	return( undef() ) if( !$io );
-	#print( STDERR "Module::Generic::log: \$io is not an open handle\n" ) if( !openhandle( $io ) && $io );
-	return( undef() ) if( !Scalar::Util::openhandle( $io ) && $io );
-	## 2019-06-14: I decided to remove this test, because if a log is provided it should print to it
-	## If we are on the command line, we can easily just do tail -f log_file.txt for example and get the same result as
-	## if it were printed directly on the console
-# 	my $rc = CORE::print( $io @_ ) || return( $self->error( "Unable to print to log file: $!" ) );
-	my $rc = $io->print( @_ ) || return( $self->error( "Unable to print to log file: $!" ) );
-	## print( STDERR "Module::Generic::log (", ref( $self ), "): successfully printed to debug log file. \$rc is $rc, \$io is '$io' and message is: ", join( '', @_ ), "\n" );
-	return( $rc );
-}
-
-sub log_io
-{
-	#return( shift->_set_get( 'log_io', @_ ) );
-	my $self = shift( @_ );
-	my $class = ref( $self );
-	if( @_ )
-	{
-		my $io = shift( @_ );
-		$self->_set_get( 'log_io', $io );
-	}
-	elsif( ${ "${class}::LOG_DEBUG" } && 
-		!$self->_set_get( 'log_io' ) && 
-		${ "${class}::DEB_LOG" } )
-	{
-		our $DEB_LOG = ${ "${class}::DEB_LOG" };
-		unless( $DEBUG_LOG_IO )
-		{
-			$DEBUG_LOG_IO = IO::File->new( ">>$DEB_LOG" ) || die( "Unable to open debug log file $DEB_LOG in append mode: $!\n" );
-			$DEBUG_LOG_IO->binmode( ':utf8' );
-			$DEBUG_LOG_IO->autoflush( 1 );
-		}
-		$self->_set_get( 'log_io', $DEBUG_LOG_IO );
-	}
-	return( $self->_set_get( 'log_io' ) );
-}
-
 sub log4perl
 {
 	my $self = shift( @_ );
@@ -554,6 +511,7 @@ sub message
         
         my $info = 
         {
+        'formatted'	=> $mesg,
 		'message'	=> $txt,
 		'file'		=> $file,
 		'line'		=> $line,
@@ -583,7 +541,7 @@ sub message
         }
         ## Or maybe then into a private log file?
         ## This way, even if the log method is superseeded, we can keep using ours without interfering with the other one
-        elsif( &log( $self, $mesg, "\n" ) )
+        elsif( $self->message_log( $mesg, "\n" ) )
         {
         	return( 1 );
         }
@@ -738,6 +696,49 @@ sub message_frame
     	}
     }
     return( $mf );
+}
+
+sub message_log
+{
+	my $self = shift( @_ );
+	my $io   = $self->message_log_io;
+	#print( STDERR "Module::Generic::log: \$io now is '$io'\n" );
+	return( undef() ) if( !$io );
+	#print( STDERR "Module::Generic::log: \$io is not an open handle\n" ) if( !openhandle( $io ) && $io );
+	return( undef() ) if( !Scalar::Util::openhandle( $io ) && $io );
+	## 2019-06-14: I decided to remove this test, because if a log is provided it should print to it
+	## If we are on the command line, we can easily just do tail -f log_file.txt for example and get the same result as
+	## if it were printed directly on the console
+# 	my $rc = CORE::print( $io @_ ) || return( $self->error( "Unable to print to log file: $!" ) );
+	my $rc = $io->print( @_ ) || return( $self->error( "Unable to print to log file: $!" ) );
+	## print( STDERR "Module::Generic::log (", ref( $self ), "): successfully printed to debug log file. \$rc is $rc, \$io is '$io' and message is: ", join( '', @_ ), "\n" );
+	return( $rc );
+}
+
+sub message_log_io
+{
+	#return( shift->_set_get( 'log_io', @_ ) );
+	my $self = shift( @_ );
+	my $class = ref( $self );
+	if( @_ )
+	{
+		my $io = shift( @_ );
+		$self->_set_get( 'log_io', $io );
+	}
+	elsif( ${ "${class}::LOG_DEBUG" } && 
+		!$self->_set_get( 'log_io' ) && 
+		${ "${class}::DEB_LOG" } )
+	{
+		our $DEB_LOG = ${ "${class}::DEB_LOG" };
+		unless( $DEBUG_LOG_IO )
+		{
+			$DEBUG_LOG_IO = IO::File->new( ">>$DEB_LOG" ) || die( "Unable to open debug log file $DEB_LOG in append mode: $!\n" );
+			$DEBUG_LOG_IO->binmode( ':utf8' );
+			$DEBUG_LOG_IO->autoflush( 1 );
+		}
+		$self->_set_get( 'log_io', $DEBUG_LOG_IO );
+	}
+	return( $self->_set_get( 'log_io' ) );
 }
 
 sub message_switch
@@ -1204,7 +1205,7 @@ sub _set_get_object
     		elsif( Scalar::Util::blessed( $_[0] ) )
     		{
 				my $o = shift( @_ );
-				return( $self->error( "Object provided for $field is not a valid $class object" ) ) if( !$o->isa( "$class" ) );
+				return( $self->error( "Object provided (", ref( $o ), ") for $field is not a valid $class object" ) ) if( !$o->isa( "$class" ) );
 				$o->debug( $self->{debug} ) if( $o->can( 'debug' ) );
 				$self->{ $field } = $o;
     		}

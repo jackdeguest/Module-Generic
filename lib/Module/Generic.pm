@@ -1,7 +1,7 @@
 ## -*- perl -*-
 ##----------------------------------------------------------------------------
 ## Module/Generic.pm
-## Version 0.5.1
+## Version 0.5.3
 ## Copyright(c) 2019 Jacques Deguest
 ## Author: Jacques Deguest <jack@deguest.jp>
 ## Created 2019/08/24
@@ -39,7 +39,7 @@ BEGIN
     @EXPORT      = qw( );
     @EXPORT_OK   = qw( subclasses );
     %EXPORT_TAGS = ();
-    $VERSION     = '0.5.1';
+    $VERSION     = '0.5.3';
     $VERBOSE     = 0;
     $DEBUG       = 0;
     $SILENT_AUTOLOAD      = 1;
@@ -427,6 +427,8 @@ sub init
     return( $self );
 }
 
+sub log_handler { return( shift->_set_get_code( '_log_handler', @_ ) ); }
+
 sub log4perl
 {
 	my $self = shift( @_ );
@@ -522,12 +524,16 @@ sub message
         $info->{type} = $opts->{type} if( $opts->{type} );
         
         ## If Mod perl is activated AND we are not using a private log
-        if( $MOD_PERL && !${ "${class}::LOG_DEBUG" } )
+        my $r;
+        if( $MOD_PERL && !${ "${class}::LOG_DEBUG" } && ( $r = eval{ require Apache2::RequestUtil; Apache2::RequestUtil->request; } ) )
+        {
+        	$r->log_error( $mesg );
+        }
+        elsif( $MOD_PERL && !${ "${class}::LOG_DEBUG" } )
         {
 			require Apache2::ServerUtil;
 			my $s = Apache2::ServerUtil->server;
-        	$s->log_error( $mesg );
-			## $r->rflush;
+			$s->log_error( $mesg );
         }
         ## e.g. in our package, we could set the handler using the curry module like $self->{_log_handler} = $self->curry::log
         elsif( !-t( STDIN ) && $self->{_log_handler} && ref( $self->{_log_handler} ) eq 'CODE' )
@@ -1038,6 +1044,19 @@ sub _set_get
     {
         return( $hash->{ $field } );
     }
+}
+
+sub _set_get_code
+{
+	my $self = shift( @_ );
+    my $field = shift( @_ );
+	if( @_ )
+	{
+		my $v = shift( @_ );
+		return( $self->error( "Value provided for \"$field\" ($v) is not an anonymous subroutine (code). You can pass as argument something like \$self->curry::my_sub or something like sub { some_code_here; }" ) ) if( ref( $v ) );
+		$self->{ $field } = $v;
+	}
+	return( $self->{ $field } );
 }
 
 sub _set_get_datetime

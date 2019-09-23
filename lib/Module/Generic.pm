@@ -527,7 +527,14 @@ sub message
         my $r;
         if( $MOD_PERL && !${ "${class}::LOG_DEBUG" } && ( $r = eval{ require Apache2::RequestUtil; Apache2::RequestUtil->request; } ) )
         {
-        	$r->log_error( $mesg );
+        	if( my $log_handler = $r->get_handlers( 'PerlPrivateLogHandler' ) )
+        	{
+        		$log_handler->( $mesg );
+        	}
+        	else
+        	{
+				$r->log_error( $mesg );
+        	}
         }
         elsif( $MOD_PERL && !${ "${class}::LOG_DEBUG" } )
         {

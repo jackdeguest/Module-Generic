@@ -1,7 +1,7 @@
 ## -*- perl -*-
 ##----------------------------------------------------------------------------
 ## Module/Generic.pm
-## Version 0.5.3
+## Version 0.5.4
 ## Copyright(c) 2019 Jacques Deguest
 ## Author: Jacques Deguest <jack@deguest.jp>
 ## Created 2019/08/24
@@ -39,7 +39,7 @@ BEGIN
     @EXPORT      = qw( );
     @EXPORT_OK   = qw( subclasses );
     %EXPORT_TAGS = ();
-    $VERSION     = '0.5.3';
+    $VERSION     = '0.5.4';
     $VERBOSE     = 0;
     $DEBUG       = 0;
     $SILENT_AUTOLOAD      = 1;
@@ -198,6 +198,8 @@ sub debug
     return( $hash->{ 'debug' } || ${"$class\:\:DEBUG"} );
 }
 
+sub dump { return( shift->printer( @_ ) ); }
+
 sub dumper
 {
     my $self  = shift( @_ );
@@ -316,7 +318,12 @@ sub error
         {
 			warn( $o );
         }
-		return( undef() );
+        ## https://metacpan.org/pod/Perl::Critic::Policy::Subroutines::ProhibitExplicitReturnUndef
+        ## https://perlmonks.org/index.pl?node_id=741847
+        ## Because in list context this would create a lit with one element undef()
+        ## A bare return will return an empty list or an undef scalar
+		## return( undef() );
+		return;
 	}
 	return( $self->{ 'error' } );
 }

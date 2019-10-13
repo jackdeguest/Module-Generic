@@ -1,7 +1,7 @@
 ## -*- perl -*-
 ##----------------------------------------------------------------------------
 ## Module/Generic.pm
-## Version 0.5.4
+## Version 0.6
 ## Copyright(c) 2019 Jacques Deguest
 ## Author: Jacques Deguest <jack@deguest.jp>
 ## Created 2019/08/24
@@ -30,6 +30,9 @@ BEGIN
 	# use Class::Struct qw( struct );
 	use Text::Number;
 	use Number::Format;
+	use B;
+	## To get some context on what the caller expect. This is used in our error() method to allow chaining without breaking
+	use Want;
     our( @ISA, @EXPORT_OK, @EXPORT, %EXPORT_TAGS, $AUTOLOAD );
     our( $VERSION, $ERROR, $SILENT_AUTOLOAD, $VERBOSE, $DEBUG, $MOD_PERL );
     our( $PARAM_CHECKER_LOAD_ERROR, $PARAM_CHECKER_LOADED, $CALLER_LEVEL );
@@ -39,7 +42,7 @@ BEGIN
     @EXPORT      = qw( );
     @EXPORT_OK   = qw( subclasses );
     %EXPORT_TAGS = ();
-    $VERSION     = '0.5.4';
+    $VERSION     = '0.6';
     $VERBOSE     = 0;
     $DEBUG       = 0;
     $SILENT_AUTOLOAD      = 1;
@@ -58,6 +61,7 @@ BEGIN
         require Apache2::Log;
         require Apache2::ServerUtil;
         require Apache2::RequestUtil;
+        require Apache2::ServerRec;
     }
 	
 	our $DEBUG_LOG_IO = undef();
@@ -200,6 +204,9 @@ sub debug
 
 sub dump { return( shift->printer( @_ ) ); }
 
+## For backward compatibility and traceability
+sub dump_print { return( shift->dumpto_printer( @_ ) ); }
+
 sub dumper
 {
     my $self  = shift( @_ );
@@ -297,36 +304,76 @@ sub error
 		}
 		else
 		{
-			$args->{ 'message' } = join( '', map( ref( $_ ) eq 'CODE' ? $_->() : $_, @_ ) );
+			$args->{message} = join( '', map( ref( $_ ) eq 'CODE' ? $_->() : $_, @_ ) );
 		}
 		$args->{message} = substr( $args->{message}, 0, $self->{error_max_length} ) if( $self->{error_max_length} > 0 && length( $args->{message} ) > $self->{error_max_length} );
 		my $n = 1;
 		$n++ while( ( caller( $n ) )[0] eq 'Module::Generic' );
-		$args->{skip_frames} = $n;
-		my $o = $self->{ 'error' } = ${ $class . '::ERROR' } = Module::Generic::Exception->new( $args );
+		$args->{skip_frames} = $n + 1;
+		## my( $p, $f, $l ) = caller( $n );
+		## my( $sub ) = ( caller( $n + 1 ) )[3];
+		my $o = $self->{error} = ${ $class . '::ERROR' } = Module::Generic::Exception->new( $args );
+		## printf( STDERR "%s::error() called from package %s ($p) in file %s ($f) at line %d ($l) from sub %s ($sub)\n", __PACKAGE__, $o->package, $o->file, $o->line, $o->subroutine );
 		
+		my $r;
+		$r = Apache2::RequestUtil->request if( $MOD_PERL );
+		# $r->log_error( "Called for error $o" ) if( $r );
+		$r->warn( $o->as_string ) if( $r );
 		if( $self->{error_handler} && ref( $self->{error_handler} ) eq 'CODE' )
 		{
+			# $r->log_error( "Module::Generic::error(): called for object error hanler" ) if( $r );
 			$self->{error_handler}->( $o );
 		}
-        elsif( $self->{ 'fatal' } )
+        elsif( $r )
+        {
+			# $r->log_error( "Module::Generic::error(): called for Apache mod_perl error hanler" ) if( $r );
+        	if( my $log_handler = $r->get_handlers( 'PerlPrivateErrorHandler' ) )
+        	{
+        		$log_handler->( $o );
+        	}
+        	else
+        	{
+				# $r->log_error( "Module::Generic::error(): No Apache mod_perl error handler set, reverting to log_error" ) if( $r );
+				# $r->log_error( "$o" );
+				$r->warn( $o->as_string );
+        	}
+        }
+        elsif( $self->{fatal} )
         {
             ## die( sprintf( "Within package %s in file %s at line %d: %s\n", $o->package, $o->file, $o->line, $o->message ) );
+			# $r->log_error( "Module::Generic::error(): called calling die" ) if( $r );
             die( $o );
         }
-        elsif( !exists( $self->{ 'quiet' } ) || !$self->{ 'quiet' } )
+        elsif( !exists( $self->{quiet} ) || !$self->{quiet} )
         {
-			warn( $o );
+			# $r->log_error( "Module::Generic::error(): calling warn" ) if( $r );
+			if( $r )
+			{
+				$r->warn( $o->as_string );
+			}
+			else
+			{
+				warn( $o );
+			}
         }
         ## https://metacpan.org/pod/Perl::Critic::Policy::Subroutines::ProhibitExplicitReturnUndef
         ## https://perlmonks.org/index.pl?node_id=741847
         ## Because in list context this would create a lit with one element undef()
         ## A bare return will return an empty list or an undef scalar
 		## return( undef() );
+		## return;
+		## As of 2019-10-13, Module::Generic version 0.6, we use this special package Module::Generic::Null to be returned in chain without perl causing the error that a method was called on an undefined value
+		if( want( 'OBJECT' ) )
+		{
+			my $null = Module::Generic::Null->new( $o, { debug => $self->{debug}, has_error => 1 });
+			rreturn( $null );
+		}
 		return;
 	}
-	return( $self->{ 'error' } );
+	return( $self->{error} );
 }
+
+sub error_handler { return( shift->_set_get_code( '_error_handler', @_ ) ); }
 
 *errstr = \&error;
 
@@ -460,8 +507,11 @@ sub message
     ## my( $pack, $file, $line ) = caller;
     my $hash = $self->_obj2h;
     ## print( STDERR __PACKAGE__ . "::message(): Called from package $pack in file $file at line $line with debug value '$hash->{debug}', package DEBUG value '", ${ $class . '::DEBUG' }, "' and params '", join( "', '", @_ ), "'\n" );
-    if( $hash->{ 'verbose' } || $hash->{ 'debug' } || ${ $class . '::DEBUG' } )
+    my $r;
+    $r = Apache2::RequestUtil->request if( $MOD_PERL );
+    if( $hash->{verbose} || $hash->{debug} || ${ $class . '::DEBUG' } )
     {
+    	# $r->log_error( "Got here in Module::Generic::message before checking message." ) if( $r );
         my $ref;
         $ref = $self->message_check( @_ );
     	## print( STDERR __PACKAGE__ . "::message(): message_check() returns '$ref' (", join( '', @$ref ), ")\n" );
@@ -470,12 +520,16 @@ sub message
         
         my $opts = {};
         $opts = pop( @$ref ) if( ref( $ref->[-1] ) eq 'HASH' );
+        ## print( STDERR __PACKAGE__ . "::message(): \$opts contains: ", $self->dumper( $opts ), "\n" );
         
         ## By now, we should have a reference to @_ in $ref
         ## my $class = ref( $self ) || $self;
+        ## print( STDERR __PACKAGE__ . "::message(): caller at 0 is ", (caller(0))[3], " and at 1 is ", (caller(1))[3], "\n" );
+    	## $r->log_error( "Got here in Module::Generic::message checking frames stack." ) if( $r );
         my $stackFrame = $self->message_frame( (caller(1))[3] ) || 1;
         $stackFrame = 1 unless( $stackFrame =~ /^\d+$/ );
         $stackFrame-- if( $stackFrame );
+        $stackFrame++ if( (caller(1))[3] eq 'Module::Generic::messagef' );
         my( $pkg, $file, $line, @otherInfo ) = caller( $stackFrame );
         my $sub = ( caller( $stackFrame + 1 ) )[3];
         my $sub2 = substr( $sub, rindex( $sub, '::' ) + 2 );
@@ -491,6 +545,7 @@ sub message
         		}
         	}
         }
+        ## $r->log_error( "Called from package $pkg in file $file at line $line from sub $sub2 ($sub)" ) if( $r );
         if( $sub2 eq 'message' )
         {
             $stackFrame++;
@@ -498,6 +553,7 @@ sub message
 			my $sub = ( caller( $stackFrame + 1 ) )[3];
             $sub2 = substr( $sub, rindex( $sub, '::' ) + 2 );
         }
+    	## $r->log_error( "Got here in Module::Generic::message building the message string." ) if( $r );
         my $txt;
         if( $opts->{message} )
         {
@@ -514,7 +570,9 @@ sub message
         {
 			$txt = join( '', map( ref( $_ ) eq 'CODE' ? $_->() : $_, @$ref ) );
         }
-        my $mesg = "${class}::${sub2}() [$line]: " . $txt;
+    	## $r->log_error( "Got here in Module::Generic::message with message string '$txt'." ) if( $r );
+        no overloading;
+        my $mesg = "${pkg}::${sub2}( $self ) [$line]: " . $txt;
         $mesg    =~ s/\n$//gs;
         $mesg = '## ' . join( "\n## ", split( /\n/, $mesg ) );
         
@@ -530,12 +588,17 @@ sub message
         };
         $info->{type} = $opts->{type} if( $opts->{type} );
         
+    	## $r->log_error( "Got here in Module::Generic::message checkin if we run under ModPerl." ) if( $r );
         ## If Mod perl is activated AND we are not using a private log
-        my $r;
-        if( $MOD_PERL && !${ "${class}::LOG_DEBUG" } && ( $r = eval{ require Apache2::RequestUtil; Apache2::RequestUtil->request; } ) )
+        ## my $r;
+        ## if( $MOD_PERL && !${ "${class}::LOG_DEBUG" } && ( $r = eval{ require Apache2::RequestUtil; Apache2::RequestUtil->request; } ) )
+        if( $r && !${ "${class}::LOG_DEBUG" } )
         {
+        	## $r->log_error( "Got here in Module::Generic::message, going to call our log handler." );
         	if( my $log_handler = $r->get_handlers( 'PerlPrivateLogHandler' ) )
         	{
+				# my $meta = B::svref_2object( $log_handler );
+				# $r->log_error( "Module::Generic::message(): Log handler code routine name is " . $meta->GV->NAME . " called in file " . $meta->GV->FILE . " at line " . $meta->GV->LINE );
         		$log_handler->( $mesg );
         	}
         	else
@@ -543,6 +606,7 @@ sub message
 				$r->log_error( $mesg );
         	}
         }
+        ## Using ModPerl Server to log
         elsif( $MOD_PERL && !${ "${class}::LOG_DEBUG" } )
         {
 			require Apache2::ServerUtil;
@@ -552,6 +616,10 @@ sub message
         ## e.g. in our package, we could set the handler using the curry module like $self->{_log_handler} = $self->curry::log
         elsif( !-t( STDIN ) && $self->{_log_handler} && ref( $self->{_log_handler} ) eq 'CODE' )
         {
+        	# $r = Apache2::RequestUtil->request;
+        	# $r->log_error( "Got here in Module::Generic::message, going to call our log handler without using Apache callbacks." );
+			# my $meta = B::svref_2object( $self->{_log_handler} );
+			# $r->log_error( "Log handler code routine name is " . $meta->GV->NAME . " called in file " . $meta->GV->FILE . " at line " . $meta->GV->LINE );
         	$self->{_log_handler}->( $info );
         }
         elsif( !-t( STDIN ) && ${ $class . '::MESSAGE_HANDLER' } && ref( ${ $class . '::MESSAGE_HANDLER' } ) eq 'CODE' )
@@ -581,6 +649,7 @@ sub message
 sub messagef
 {
 	my $self = shift( @_ );
+	## print( STDERR "got here: ", ref( $self ), "::messagef\n" );
     my $class = ref( $self ) || $self;
     my $hash = $self->_obj2h;
     if( $hash->{ 'verbose' } || $hash->{ 'debug' } || ${ $class . '::DEBUG' } )
@@ -612,10 +681,11 @@ sub messagef
 			$fmt = shift( @$ref );
         }
 		my $txt = sprintf( $fmt, map( ref( $_ ) eq 'CODE' ? $_->() : $_, @$ref ) );
+		## print( STDERR ref( $self ), "::messagef \$txt is '$txt'\n" );
 		$opts->{message} = $txt;
 		$opts->{level} = $level if( defined( $level ) );
         # return( $self->message( defined( $level ) ? ( $level, $txt ) : $txt ) );
-        return( $self->message( $opts ) );
+        return( $self->message( ( $level || 0 ), $opts ) );
     }
     return( 1 );
 }
@@ -730,7 +800,7 @@ sub message_log
 	## If we are on the command line, we can easily just do tail -f log_file.txt for example and get the same result as
 	## if it were printed directly on the console
 # 	my $rc = CORE::print( $io @_ ) || return( $self->error( "Unable to print to log file: $!" ) );
-	my $rc = $io->print( @_ ) || return( $self->error( "Unable to print to log file: $!" ) );
+	my $rc = $io->print( scalar( localtime( time() ) ), " [$$]: ", @_ ) || return( $self->error( "Unable to print to log file: $!" ) );
 	## print( STDERR "Module::Generic::log (", ref( $self ), "): successfully printed to debug log file. \$rc is $rc, \$io is '$io' and message is: ", join( '', @_ ), "\n" );
 	return( $rc );
 }
@@ -830,8 +900,13 @@ sub pass_error
 	my $self = $this->_obj2h;
 	my $err  = shift( @_ );
 	return if( !ref( $err ) || !Scalar::Util::blessed( $err ) );
-	$self->{ 'error' } = ${ $class . '::ERROR' } = $err;
-	return( undef() );
+	$self->{error} = ${ $class . '::ERROR' } = $err;
+	if( want( 'OBJECT' ) )
+	{
+		my $null = Module::Generic::Null->new( $err, { debug => $self->{debug}, has_error => 1 });
+		rreturn( $null );
+	}
+	return;
 }
 
 sub quiet {	return( shift->_set_get( 'quiet', @_ ) ); }
@@ -1060,6 +1135,18 @@ sub _set_get
     }
 }
 
+sub _set_get_array
+{
+    my $self  = shift( @_ );
+    my $field = shift( @_ );
+    if( @_ )
+    {
+        my $val = ( @_ == 1 ) ? shift( @_ ) : [ @_ ];
+        $self->{ $field } = $val;
+    }
+	return( $self->{ $field } );
+}
+
 sub _set_get_code
 {
 	my $self = shift( @_ );
@@ -1115,52 +1202,6 @@ sub _set_get_datetime
 			$self->{ $field } = $now;
 		}
 	}
-	return( $self->{ $field } );
-}
-
-sub _set_get_scalar
-{
-    my $self  = shift( @_ );
-    my $field = shift( @_ );
-    if( @_ )
-    {
-        my $val = ( @_ == 1 ) ? shift( @_ ) : join( '', @_ );
-        ## Just in case, we force stringification
-        ## $val = "$val" if( defined( $val ) );
-        return( $self->error( "Method $field takes only a scalar, but value provided ($val) is a reference" ) ) if( ref( $val ) eq 'HASH' || ref( $val ) eq 'ARRAY' );
-        $self->{ $field } = $val;
-    }
-	return( $self->{ $field } );
-}
-
-sub _set_get_scalar_or_object
-{
-    my $self  = shift( @_ );
-    my $field = shift( @_ );
-    my $class = shift( @_ );
-    if( @_ )
-    {
-    	if( ref( $_[0] ) eq 'HASH' || Scalar::Util::blessed( $_[0] ) )
-    	{
-    		return( $self->_set_get_object( $field, $class, @_ ) );
-    	}
-    	else
-    	{
-    		return( $self->_set_get_scalar( $field, @_ ) );
-    	}
-    }
-	return( $self->{ $field } );
-}
-
-sub _set_get_array
-{
-    my $self  = shift( @_ );
-    my $field = shift( @_ );
-    if( @_ )
-    {
-        my $val = ( @_ == 1 ) ? shift( @_ ) : [ @_ ];
-        $self->{ $field } = $val;
-    }
 	return( $self->{ $field } );
 }
 
@@ -1357,6 +1398,40 @@ sub _set_get_object_variant
 			$self->{ $field } = $res;
 		}
 	}
+	return( $self->{ $field } );
+}
+
+sub _set_get_scalar
+{
+    my $self  = shift( @_ );
+    my $field = shift( @_ );
+    if( @_ )
+    {
+        my $val = ( @_ == 1 ) ? shift( @_ ) : join( '', @_ );
+        ## Just in case, we force stringification
+        ## $val = "$val" if( defined( $val ) );
+        return( $self->error( "Method $field takes only a scalar, but value provided ($val) is a reference" ) ) if( ref( $val ) eq 'HASH' || ref( $val ) eq 'ARRAY' );
+        $self->{ $field } = $val;
+    }
+	return( $self->{ $field } );
+}
+
+sub _set_get_scalar_or_object
+{
+    my $self  = shift( @_ );
+    my $field = shift( @_ );
+    my $class = shift( @_ );
+    if( @_ )
+    {
+    	if( ref( $_[0] ) eq 'HASH' || Scalar::Util::blessed( $_[0] ) )
+    	{
+    		return( $self->_set_get_object( $field, $class, @_ ) );
+    	}
+    	else
+    	{
+    		return( $self->_set_get_scalar( $field, @_ ) );
+    	}
+    }
 	return( $self->{ $field } );
 }
 
@@ -1677,7 +1752,7 @@ sub init
 	my $skip_frame = $args->{skip_frames} || 0;
 	## Skip one frame to exclude us
 	$skip_frame++;
-    my $trace = Devel::StackTrace->new( skip_frames => $skip_frame );
+    my $trace = Devel::StackTrace->new( skip_frames => $skip_frame, indent => 1 );
     my $frame = $trace->next_frame;
     my $frame2 = $trace->next_frame;
     $trace->reset_pointer;
@@ -1792,6 +1867,46 @@ sub _obj_eq
     ## Otherwise some reference data to which we cannot compare
     return( 0 ) ;
 }
+
+## Purpose of this package is to provide an object that will be invoked in chain without breaking and then return undef at the end
+## Normally if a method in the chain returns undef, perl will then complain that the following method in the chain was called on an undefined value. This Null package alleviate this problem.
+## This is an original idea from https://stackoverflow.com/users/2766176/brian-d-foy as document in this Stackoverflow thread here: https://stackoverflow.com/a/7068271/4814971
+## And also by user "particle" in this perl monks discussion here: https://www.perlmonks.org/?node_id=265214
+package Module::Generic::Null;
+BEGIN
+{
+	use strict;
+	use Want;
+};
+
+sub new
+{
+	my $this = shift( @_ );
+	my $class = ref( $this ) || $this;
+	my $error_object = shift( @_ );
+	my $hash = ( @_ == 1 && ref( $_[0] ) ? shift( @_ ) : { @_ } );
+	$hash->{has_error} = $error_object;
+	return( bless( $hash => $class ) );
+}
+
+AUTOLOAD
+{
+	my( $method ) = our $AUTOLOAD =~ /([^:]+)$/;
+	my $debug = $_[0]->{debug};
+	my( $pack, $file, $file ) = caller;
+	my $sub = ( caller( 1 ) )[3];
+	print( STDERR __PACKAGE__, ": Method $method called in package $pack in file $file at line $line from subroutine $sub (AUTOLOAD = $AUTOLOAD)\n" ) if( $debug );
+	## If we are chained, return our null object, so the chain continues to work
+	if( want( 'OBJECT' ) )
+	{
+		## No, this is NOT a typo. rreturn() is a function of module Want
+		rreturn( $_[0] );
+	}
+	## Otherwise, we return undef; Empty return returns undef in scalar context and empty list in list context
+	return;
+};
+
+DESTROY {};
 
 package Module::Generic::Tie;
 use Tie::Hash;

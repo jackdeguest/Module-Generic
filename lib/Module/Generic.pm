@@ -1,7 +1,7 @@
 ## -*- perl -*-
 ##----------------------------------------------------------------------------
 ## Module/Generic.pm
-## Version 0.6
+## Version 0.6.2
 ## Copyright(c) 2019 Jacques Deguest
 ## Author: Jacques Deguest <jack@deguest.jp>
 ## Created 2019/08/24
@@ -30,6 +30,7 @@ BEGIN
 	# use Class::Struct qw( struct );
 	use Text::Number;
 	use Number::Format;
+	use TryCatch;
 	use B;
 	## To get some context on what the caller expect. This is used in our error() method to allow chaining without breaking
 	use Want;
@@ -42,7 +43,7 @@ BEGIN
     @EXPORT      = qw( );
     @EXPORT_OK   = qw( subclasses );
     %EXPORT_TAGS = ();
-    $VERSION     = '0.6';
+    $VERSION     = '0.6.2';
     $VERBOSE     = 0;
     $DEBUG       = 0;
     $SILENT_AUTOLOAD      = 1;
@@ -319,10 +320,11 @@ sub error
 		$r = Apache2::RequestUtil->request if( $MOD_PERL );
 		# $r->log_error( "Called for error $o" ) if( $r );
 		$r->warn( $o->as_string ) if( $r );
-		if( $self->{error_handler} && ref( $self->{error_handler} ) eq 'CODE' )
+		my $err_handler = $self->error_handler;
+		if( $err_handler && ref( $err_handler ) eq 'CODE' )
 		{
 			# $r->log_error( "Module::Generic::error(): called for object error hanler" ) if( $r );
-			$self->{error_handler}->( $o );
+			$err_handler->( $o );
 		}
         elsif( $r )
         {
@@ -430,7 +432,17 @@ sub init
     	{
     		my $name = $vals->[ $i ];
     		my $val  = $vals->[ ++$i ];
-    		if( exists( $self->{ $name } ) )
+    		my $meth;
+			if( $self->{_init_strict_use_sub} )
+			{
+				if( !defined( $meth = $self->can( $name ) ) )
+				{
+					$self->error( "Unknown method $name in class $pkg" );
+					next;
+				}
+				$self->$meth( $val );
+			}
+    		elsif( exists( $self->{ $name } ) )
     		{
     			if( index( $self->{ $name }, '::' ) != -1 || $self->{ $name } =~ /^[a-zA-Z][a-zA-Z\_]*[a-zA-Z]$/ )
     			{
@@ -1061,9 +1073,19 @@ sub _instantiate_object
 	my $self = shift( @_ );
     my $field = shift( @_ );
     my $class = shift( @_ );
-	my $o = @_ ? $class->new( @_ ) : $class->new;
-	$o->debug( $self->{debug} ) if( $o->can( 'debug' ) );
-	return( $self->error( "Unable to instantiate an object of class $class: ", $class->error ) ) if( !defined( $o ) );
+	my $o;
+	try
+	{
+		## https://stackoverflow.com/questions/32608504/how-to-check-if-perl-module-is-available#comment53081298_32608860
+		require $class unless( defined( *{"${class}::"} ) );
+		$o = @_ ? $class->new( @_ ) : $class->new;
+		$o->debug( $self->{debug} ) if( $o->can( 'debug' ) );
+		return( $self->pass_error( "Unable to instantiate an object of class $class: ", $class->error ) ) if( !defined( $o ) );
+	}
+	catch( $e ) 
+	{
+		return( $self->error({ code => 500, message => $e }) );
+	}
 	return( $o );
 }
 
@@ -1230,6 +1252,36 @@ sub _set_get_hash
 	return( $self->{ $field } );
 }
 
+sub _set_get_hash_as_object
+{
+	my $self = shift( @_ );
+	my $field = shift( @_ ) || return( $self->error( "No field provided for _set_get_hash_as_object" ) );
+	my $class = shift( @_ );
+	if( @_ )
+	{
+		my $hash = shift( @_ );
+		my $perl = <<EOT;
+package $class;
+BEGIN
+{
+	use strict;
+	use Module::Generic;
+	use parent -norequire, qw( Module::Generic::Dynamic );
+};
+
+1;
+
+EOT
+		# print( STDERR __PACKAGE__, "::_set_get_hash_as_object(): Evaluating\n$perl\n" );
+		my $rc = eval( $perl );
+		# print( STDERR __PACKAGE__, "::_set_get_hash_as_object(): Returned $rc\n" );
+		die( "Unable to dynamically create module $class: $@" ) if( $@ );
+		my $o = $class->new( $hash );
+		$self->{ $field } = $o;
+	}
+	return( $self->{ $field } );
+}
+
 sub _set_get_number
 {
     my $self  = shift( @_ );
@@ -1297,6 +1349,14 @@ sub _set_get_object
 			$self->{ $field } = $o;
     	}
     }
+    ## If nothing has been set for this field, ie no object, but we are called in chain
+    ## we set a dummy object that will just call itself to avoid perl complaining about undefined value calling a method
+	if( !$self->{ $field } && want( 'OBJECT' ) )
+	{
+		# print( STDERR __PACKAGE__, "::_set_get_object(): Called in a chain, but no object is set, reverting to dummy object\n" );
+		my $null = Module::Generic::Null->new( $o, { debug => $self->{debug}, has_error => 1 });
+		rreturn( $null );
+	}
 	return( $self->{ $field } );
 }
 
@@ -1907,6 +1967,55 @@ AUTOLOAD
 };
 
 DESTROY {};
+
+package Module::Generic::Dynamic;
+BEGIN
+{
+	use strict;
+	use parent qw( Module::Generic );
+};
+
+sub new
+{
+	my $this = shift( @_ );
+	my $class = ref( $this ) || $this;
+	my $self = bless( {} => $class );
+	my $hash = {};
+	$hash = shift( @_ ) if( scalar( @_ ) && ref( $_[0] ) eq 'HASH' );
+	# print( STDERR __PACKAGE__, "::new(): Got for hash\n" );
+	foreach my $k ( sort( keys( %$hash ) ) )
+	{
+		$self->$k( $hash->{ $k } );
+	}
+	return( $self );
+}
+
+AUTOLOAD
+{
+	my( $method ) = our $AUTOLOAD =~ /([^:]+)$/;
+	no overloading;
+	my $self = shift( @_ );
+	my $code;
+	# print( STDERR __PACKAGE__, "::$method(): Called\n" );
+	if( $code = $self->can( $method ) )
+	{
+		return( $code->( @_ ) );
+	}
+	## elsif( CORE::exists( $self->{ $method } ) )
+	else
+	{
+		my $ref = lc( ref( $_[0] ) );
+		my $handler = '_set_get_scalar';
+		if( @_ && ( $ref eq 'hash' || $ref eq 'array' ) )
+		{
+			# print( STDERR __PACKAGE__, "::$method(): using handler $handler for type $ref\n" );
+			$handler = "_set_get_${ref}";
+		}
+		eval( "sub $method { return( shift->$handler( '$method', \@_ ) ); }" );
+		die( $@ ) if( $@ );
+		return( $self->$method( @_ ) );
+	}
+};
 
 package Module::Generic::Tie;
 use Tie::Hash;
